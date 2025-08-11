@@ -1,17 +1,11 @@
 # python scripts/infer_single_image.py --wsi ./input_data/slides/R_T14-09850_10.tiff --output output/full_model_inference/
 # python scripts/infer_single_image.py --wsi ./input_data/slides/RBIO-GC072-HE-01.tiff --output output/full_model_inference/
+# python scripts/infer_single_image.py --wsi ./input_data/slides/RBIO-GC072-HE-01.tiff --output output/full_model_inference/ --rois '[{"x":1950,"y":1890,"width":6123,"height":4632}]'
 
 import argparse
 import subprocess
 from pathlib import Path
-import csv
-
-
-def generate_filelist(wsi_path: Path, filelist_path: Path, mpp=0.25, magnification=40):
-    with open(filelist_path, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["path", "slide_mpp", "magnification"])
-        writer.writerow([str(wsi_path.resolve()), str(mpp), str(magnification)])
+import json
 
 
 def main():
@@ -31,16 +25,38 @@ def main():
         ),
     )
     parser.add_argument("--classifier", type=Path, default=None)
-    parser.add_argument("--resolution", default="0.25")
+    parser.add_argument("--resolution", default=0.25)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--logdir", type=Path, default=Path("./output/runner_logs"))
+    parser.add_argument(
+        "--rois",
+        type=str,
+        help=(
+            "Regions of interest (ROIs) as a JSON string or path to a JSON file. "
+            "Each ROI should be a dictionary with keys 'x', 'y', 'width', and 'height'."
+        ),
+    )
     args = parser.parse_args()
+
+    # Parse ROIs
+    rois = None
+    if args.rois:
+        try:
+            # Check if it's a JSON string
+            rois = json.loads(args.rois)
+        except json.JSONDecodeError:
+            # If not, assume it's a path to a JSON file
+            rois_path = Path(args.rois)
+            if rois_path.is_file():
+                with open(rois_path, "r") as f:
+                    rois = json.load(f)
+            else:
+                raise ValueError(
+                    f"Invalid ROIs argument. Must be a JSON string or a path to a JSON file: {args.rois}"
+                )
 
     filelist_path = args.output / f"filelist_{args.wsi.stem}.csv"
     filelist_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Write one-image filelist
-    generate_filelist(args.wsi, filelist_path)
 
     # Build inference command
     command = [
@@ -48,9 +64,11 @@ def main():
         "--model",
         str(args.model),
         "--resolution",
-        args.resolution,
+        str(args.resolution),
         "--batch_size",
         str(args.batch_size),
+        "--gpu",
+        "0",
         "--geojson",
         "--compression",
         "--graph",
@@ -64,8 +82,14 @@ def main():
     else:
         command += ["--binary"]
 
-    # Now add the subcommand and its args
-    command += ["process_dataset", "--filelist", str(filelist_path)]
+    # Now the subcommand and its (subparser) args
+    command += [
+        "process_wsi",
+        "--wsi_path",
+        str(args.wsi),
+        "--wsi_properties",
+        json.dumps({"slide_mpp": 0.25, "magnification": 40}),
+    ]
 
     # Log
     print("[INFO] Submitting SLURM job...")
