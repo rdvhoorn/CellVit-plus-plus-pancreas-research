@@ -210,3 +210,7 @@ __marimo__/
 *.tiff
 *.svs
 *.pth
+*.geojson
+*.snappy
+*.pt
+output/
