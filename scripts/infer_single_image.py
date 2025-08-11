@@ -76,6 +76,9 @@ def main():
         str(args.output),
     ]
 
+    if rois is not None:
+        command += ["--rois", json.dumps(rois)]
+
     # Add classifier or binary flag BEFORE subcommand
     if args.classifier:
         command += ["--classifier_path", str(args.classifier)]

@@ -2,7 +2,7 @@
 #SBATCH --output=/dev/null
 #SBATCH --job-name=generic_cellvit_inference_runner
 #SBATCH -p gpu
-#SBATCH --gres=gpu:H100:1
+#SBATCH --gres=gpu:4g.47gb:1
 #SBATCH -c 16                     # Request 16 CPU cores
 #SBATCH -t 02:00:00              # 2 hours max runtime
 
