@@ -29,6 +29,8 @@ Typical usage:
   - Used prior to classifier head training to generate patch-level labeled datasets
   - Output is compatible with CellViT++ training workflows
 
+TODO: Make a separate csv file that has the label counts per wsi, which can be used to make the splits in the next step
+
 sbatch scripts/inference_cpu_runner.sh train_classifier_pipeline/prepare_classifier_training_data.py
 """
 
@@ -44,6 +46,10 @@ import openslide
 from PIL import Image
 import sys
 import csv
+import gc
+from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import os
 
 
 from train_classifier_pipeline.label_mapping import LABEL_MAPPING
@@ -144,8 +150,8 @@ def generate_unique_patch_boxes_from_rois(
     return patch_boxes
 
 
-def extract_patch_image(
-    wsi_path: Path, patch_box: Tuple[int, int, int, int], level: int = 0
+def extract_patch_from_slide(
+    slide: openslide.OpenSlide, patch_box: Tuple[int, int, int, int], level: int = 0
 ) -> np.ndarray:
     """
     Extract an RGB patch from the WSI.
@@ -158,7 +164,6 @@ def extract_patch_image(
     Returns:
         RGB patch as NumPy array of shape (H, W, 3), dtype=uint8
     """
-    slide = openslide.OpenSlide(str(wsi_path))
     x_min, y_min, x_max, y_max = patch_box
     width = x_max - x_min
     height = y_max - y_min
@@ -271,21 +276,13 @@ def process_single_wsi(
     tile_size: int = 256,
     stride: int = 256,
     level: int = 0,
-):
+) -> Dict[int, int]:
     """
     Process one WSI by splitting it into patches, assigning labels from XML annotations,
     and saving labeled cell CSVs and patch PNGs for classifier training.
 
-    Args:
-        wsi_path: Path to the .tiff WSI file
-        xml_path: Path to the annotation XML file
-        pt_path: Path to the .pt file containing detected cell coordinates
-        roi_metadata: List of ROI dicts with 'x', 'y', 'w', 'h'
-        output_dir: Directory to save 'images/' and 'labels/' folders
-        label_map: Mapping of label names (from XML) to class IDs
-        tile_size: Size of each patch (default: 256x256)
-        stride: Stride between patches (default: 256)
-        level: OpenSlide level (default: 0)
+    Returns:
+        Dictionary mapping label_id → count of labeled cells in this WSI
     """
     print(f"🚧 Processing WSI: {wsi_path.name}")
 
@@ -296,28 +293,33 @@ def process_single_wsi(
     print("🧠 Loading annotations...")
     polygons = load_polygons_from_xml(xml_path)
 
+    print(f"🖼️ Opening WSI once: {wsi_path.name}")
+    slide = openslide.OpenSlide(str(wsi_path))
+
     print("📐 Generating patch grid...")
     patch_boxes = generate_unique_patch_boxes_from_rois(roi_metadata, tile_size, stride)
     print(f"🔲 Total patches: {len(patch_boxes)}")
 
+    label_counts = Counter()
     saved_patch_count = 0
 
     for i, patch_box in enumerate(patch_boxes):
         # Step 1: Filter cell detections into patch
         patch_cells = filter_cells_in_patch(cell_coords, patch_box)
-
         if len(patch_cells) == 0:
-            continue  # Skip patches with no detections
+            continue
 
         # Step 2: Assign labels to cells
         labeled_cells = assign_labels_to_cells(patch_cells, polygons, label_map)
-
         if len(labeled_cells) == 0:
-            continue  # Skip patches where no cells fall into any polygon
+            continue
+
+        # Track label counts
+        label_counts.update(label for _, _, label in labeled_cells)
 
         # Step 3: Extract patch image
         try:
-            patch_img = extract_patch_image(wsi_path, patch_box, level=level)
+            patch_img = extract_patch_from_slide(slide, patch_box, level=level)
         except Exception as e:
             print(f"⚠️  Failed to extract patch {i}: {e}")
             continue
@@ -336,6 +338,37 @@ def process_single_wsi(
 
     print(f"✅ Done. Saved {saved_patch_count} labeled patches.")
 
+    slide.close()
+    del cell_coords, polygons, patch_boxes
+    gc.collect()
+
+    # ✅ Return label counts for aggregation
+    return dict(label_counts)
+
+
+def run_wsi_job(
+    args: Tuple[str, Path, Path, Path, List[dict], dict],
+) -> Tuple[str, Dict[int, int]]:
+    """
+    Wrapper function for multiprocessing: processes a single WSI and returns WSI ID + label counts.
+    """
+    wsi_id, tiff_file, xml_file, pt_file, rois, config = args
+
+    print(f"\n🚀 Processing {wsi_id}")
+    label_counts = process_single_wsi(
+        wsi_path=tiff_file,
+        xml_path=xml_file,
+        pt_path=pt_file,
+        roi_metadata=rois,
+        output_dir=config["output_dir"],
+        label_map=config["label_map"],
+        tile_size=config["tile_size"],
+        stride=config["stride"],
+        level=config["level"],
+    )
+
+    return wsi_id, label_counts
+
 
 def process_all_wsis(
     tiff_dir: Path,
@@ -343,12 +376,14 @@ def process_all_wsis(
     pt_dir: Path,
     roi_csv_path: Path,
     output_dir: Path,
+    label_map: Dict[str, int],
     tile_size: int = 256,
     stride: int = 256,
     level: int = 0,
+    num_workers: int = os.cpu_count(),
 ):
     """
-    Batch process all WSIs in the specified directories.
+    Batch process all WSIs using multiprocessing. Also aggregates per-WSI label statistics.
 
     Args:
         tiff_dir: Directory with .tiff WSI files
@@ -356,14 +391,19 @@ def process_all_wsis(
         pt_dir: Directory with .pt detection files
         roi_csv_path: CSV with metadata containing 'path' and 'rois'
         output_dir: Root output directory
+        label_map: Dictionary mapping label names to integer IDs
+        tile_size: Patch size
+        stride: Patch stride
+        level: OpenSlide level
+        num_workers: Number of parallel processes
     """
     print("📄 Loading ROI metadata...")
     df = pd.read_csv(roi_csv_path)
 
+    # Prepare job list
+    jobs = []
     for pt_file in sorted(pt_dir.glob("*.pt")):
-        wsi_id = pt_file.stem.replace("_cells", "")  # "RT14-08465"
-
-        # Locate matching files
+        wsi_id = pt_file.stem.replace("_cells", "")
         tiff_file = next(tiff_dir.glob(f"{wsi_id}.*"), None)
         xml_file = next(xml_dir.glob(f"{wsi_id}.xml"), None)
 
@@ -371,38 +411,65 @@ def process_all_wsis(
             print(f"❌ Missing files for {wsi_id}, skipping.")
             continue
 
-        # Find ROI row from CSV
         matched_row = df[df["path"].str.endswith(str(tiff_file))]
         if matched_row.empty:
-            print(f"❌ No ROI metadata found for {wsi_id}, skipping.")
+            print(f"❌ No ROI metadata for {wsi_id}, skipping.")
             continue
 
         rois = json.loads(matched_row.iloc[0]["rois"])
-
-        print(f"\n🚀 Processing {wsi_id}")
-        process_single_wsi(
-            wsi_path=tiff_file,
-            xml_path=xml_file,
-            pt_path=pt_file,
-            roi_metadata=rois,
-            output_dir=output_dir,
-            label_map=LABEL_MAPPING,
-            tile_size=tile_size,
-            stride=stride,
-            level=level,
+        jobs.append(
+            (
+                wsi_id,
+                tiff_file,
+                xml_file,
+                pt_file,
+                rois,
+                {
+                    "output_dir": output_dir,
+                    "label_map": label_map,
+                    "tile_size": tile_size,
+                    "stride": stride,
+                    "level": level,
+                },
+            )
         )
+
+    # Process in parallel
+    print(f"🧵 Starting processing with {num_workers} workers...")
+    all_label_counts = []
+
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        futures = [executor.submit(run_wsi_job, job) for job in jobs]
+        for future in as_completed(futures):
+            try:
+                wsi_id, label_counts = future.result()
+                for label_id, count in label_counts.items():
+                    all_label_counts.append(
+                        {"wsi_id": wsi_id, "label_id": label_id, "count": count}
+                    )
+            except Exception as e:
+                print(f"❌ Job failed: {e}")
+
+    # Save aggregated label counts
+    if all_label_counts:
+        label_df = pd.DataFrame(all_label_counts)
+        label_df.to_csv(output_dir / "wsi_label_counts.csv", index=False)
+        print(
+            f"📊 Saved global label summary to: {output_dir / 'wsi_label_counts.csv'}"
+        )
+    else:
+        print("⚠️ No label counts were collected.")
 
 
 if __name__ == "__main__":
-    # Change these paths to match your directory layout
     cellvit_project_path = "../CellViT-plus-plus"
+    sys.path.insert(0, cellvit_project_path)
+
     tiff_dir = Path("input_data/slides/pancreas/tiffs/")
     xml_dir = Path("input_data/slides/pancreas/xmls/")
     pt_dir = Path("output/full_model_inference/pancreas/")
     roi_csv = Path("input_data/data_configuration/input_list_2025-08-13.csv")
     output_dir = Path("output/classifier_data/")
-
-    sys.path.insert(0, cellvit_project_path)
 
     process_all_wsis(
         tiff_dir=tiff_dir,
@@ -410,7 +477,9 @@ if __name__ == "__main__":
         pt_dir=pt_dir,
         roi_csv_path=roi_csv,
         output_dir=output_dir,
+        label_map=LABEL_MAPPING,
         tile_size=256,
         stride=256,
         level=0,
+        num_workers=None,  # or set to os.cpu_count() or 4, 8, etc.
     )

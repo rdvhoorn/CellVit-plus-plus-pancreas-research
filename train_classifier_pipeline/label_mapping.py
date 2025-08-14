@@ -1,19 +1,23 @@
 LABEL_MAPPING = {
+    "cancer_ducts": 0,
+    "in_situ_neoplasia": 0,
+
+    "normal_ducts": 1,
+    "fat": 2,
+
+    "acinic_tissue": 3,
+    "atrophic_metaplastic_parenchyma": 3,
+    "islets": 3,
+
+    # Skip the rest
     "tumor_area": 0,
+    "duodenum": 1,
     "non_tumor_area": 1,
-    "cancer_ducts": 2,
-    "normal_ducts": 3,
-    "islets": 4,
-    "nerves": 5,
-    "lymfocytic_infiltrate": 6,
-    "vessels": 7,
-    "fat": 8,
-    "atrophic_metaplastic_parenchyma": 9,
-    "acinic_tissue": 10,
-    "mucinous_dissection": 11,
-    "uncertain": 12,
-    "duodenum": 13,
-    "ignore": 14,
-    "in_situ_neoplasia": 15,
-    "lumen": 16,
+    "vessels": 1,
+    "nerves": 1,
+    "lumen": 1,
+    "mucinous_dissection": 1,
+    "lymfocytic_infiltrate": 1,
+    "uncertain": 1,
+    "ignore": 1,
 }
