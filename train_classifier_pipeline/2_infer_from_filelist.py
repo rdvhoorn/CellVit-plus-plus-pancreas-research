@@ -1,9 +1,9 @@
 # python scripts/infer_from_filelist.py --filelist_path ./input_data/data_configuration/input_list.csv --output output/full_model_inference/
+# python scripts/infer_from_filelist.py --filelist_path ./input_data/data_configuration/input_list_2025-08-13.csv --output output/full_model_inference/pancreas
 
 import argparse
 import subprocess
 from pathlib import Path
-import json
 
 
 def main():
@@ -30,7 +30,7 @@ def main():
     )
     parser.add_argument("--classifier", type=Path, default=None)
     parser.add_argument("--resolution", default=0.25)
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--logdir", type=Path, default=Path("./output/runner_logs"))
     args = parser.parse_args()
 
@@ -45,6 +45,7 @@ def main():
         str(args.batch_size),
         "--geojson",
         "--graph",
+        "--compression",
         "--outdir",
         str(args.output),
     ]
