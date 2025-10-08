@@ -4,6 +4,8 @@
 import argparse
 import subprocess
 from pathlib import Path
+import pandas as pd
+import json
 
 
 def main():
@@ -25,50 +27,93 @@ def main():
         "--filelist_path",
         type=str,
         required=True,
-        default=None,
         help="Path to the filelist CSV.",
     )
     parser.add_argument("--classifier", type=Path, default=None)
     parser.add_argument("--resolution", default=0.25)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--logdir", type=Path, default=Path("./output/runner_logs"))
+    parser.add_argument(
+        "--split_jobs",
+        action="store_true",
+        help="If set, submit one sbatch job per WSI in the filelist instead of one dataset job",
+    )
     args = parser.parse_args()
 
-    # Build inference command
-    command = [
-        "../CellViT-plus-plus/cellvit/detect_cells.py",
-        "--model",
-        str(args.model),
-        "--resolution",
-        str(args.resolution),
-        "--batch_size",
-        str(args.batch_size),
-        "--geojson",
-        "--graph",
-        "--compression",
-        "--outdir",
-        str(args.output),
-    ]
+    if not args.split_jobs:
+        # Original behavior: one job for whole dataset
+        command = [
+            "../CellViT-plus-plus/cellvit/detect_cells.py",
+            "--model",
+            str(args.model),
+            "--resolution",
+            str(args.resolution),
+            "--batch_size",
+            str(args.batch_size),
+            "--geojson",
+            "--graph",
+            "--compression",
+            "--outdir",
+            str(args.output),
+        ]
 
-    # Add classifier or binary flag BEFORE subcommand
-    if args.classifier:
-        command += ["--classifier_path", str(args.classifier)]
+        if args.classifier:
+            command += ["--classifier_path", str(args.classifier)]
+        else:
+            command += ["--binary"]
+
+        command += [
+            "process_dataset",
+            "--filelist",
+            str(args.filelist_path),
+        ]
+
+        print("[INFO] Submitting SLURM job...")
+        print(f"[INFO] Command: {' '.join(command)}")
+        subprocess.run(["sbatch", "scripts/inference_gpu_runner.sh"] + command)
+
     else:
-        command += ["--binary"]
+        # New behavior: one job per WSI
+        df = pd.read_csv(args.filelist_path)
+        for _, row in df.iterrows():
+            wsi_path = Path(row["path"])
+            slide_mpp = row.get("slide_mpp", args.resolution)
+            magnification = row.get("magnification", 40)
+            rois = row.get("rois", None)
 
-    # Now the subcommand and its (subparser) args
-    command += [
-        "process_dataset",
-        "--filelist",
-        str(args.filelist_path),
-    ]
+            command = [
+                "../CellViT-plus-plus/cellvit/detect_cells.py",
+                "--model",
+                str(args.model),
+                "--resolution",
+                str(args.resolution),
+                "--batch_size",
+                str(args.batch_size),
+                "--geojson",
+                "--graph",
+                "--outdir",
+                str(args.output),
+            ]
 
-    # Log
-    print("[INFO] Submitting SLURM job...")
-    print(f"[INFO] Command: {' '.join(command)}")
+            if args.classifier:
+                command += ["--classifier_path", str(args.classifier)]
+            else:
+                command += ["--binary"]
 
-    # Submit to SLURM
-    subprocess.run(["sbatch", "scripts/inference_gpu_runner.sh"] + command)
+            command += [
+                "process_wsi",
+                "--wsi_path",
+                str(wsi_path),
+                "--wsi_properties",
+                json.dumps({"slide_mpp": slide_mpp, "magnification": magnification}),
+            ]
+
+            if isinstance(rois, str) and rois.strip():
+                command += ["--rois", rois]
+
+            print("[INFO] Submitting SLURM job...")
+            print(f"[INFO] Command: {' '.join(command)}")
+            subprocess.run(["sbatch", "scripts/inference_gpu_runner.sh"] + command)
 
 
 if __name__ == "__main__":

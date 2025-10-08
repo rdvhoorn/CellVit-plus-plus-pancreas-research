@@ -55,8 +55,8 @@ def collect_tiff_roi_data(tiff_directory, xml_directory):
 
 
 df = collect_tiff_roi_data(
-    tiff_directory="/net/beegfs/users/P098864/projects/CellVit-plus-plus-pancreas-research/input_data/slides/pancreas/tiffs/",
-    xml_directory="/net/beegfs/users/P098864/projects/CellVit-plus-plus-pancreas-research/input_data/slides/pancreas/xmls/",
+    tiff_directory="/net/beegfs/groups/mmai/cellvit_pancreas/amc_cases/",
+    xml_directory="/net/beegfs/groups/mmai/cellvit_pancreas/amc_cases/",
 )
 print(df)
 
